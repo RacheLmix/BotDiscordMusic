@@ -1,1 +1,2 @@
 ffmpeg
+libsodium-dev
