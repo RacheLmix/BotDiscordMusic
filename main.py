@@ -28,28 +28,29 @@ async def on_ready():
     )
 
     await wavelink.Pool.connect(nodes=[node], client=bot)
-    print("✅ Lavalink connected")
+    print("Lavalink connected")
 
     synced = await bot.tree.sync()
-    print(f"✅ Synced {len(synced)} global slash commands")
+    print(f"Synced {len(synced)} global slash commands")
 
-
-# ================= UTIL =================
 def format_duration(ms):
     return str(timedelta(seconds=ms // 1000))
 
-
 def create_nowplaying_embed(track):
+    
     embed = discord.Embed(
-        title="🎶 Now Playing",
+        title=f"Shoko Singer Play Song {track.title}",
         description=f"**{track.title}**",
         color=discord.Color.purple()
     )
     embed.add_field(name="Author", value=track.author, inline=True)
     embed.add_field(name="Duration", value=format_duration(track.length), inline=True)
-
-    if track.artwork:
-        embed.set_thumbnail(url=track.artwork)
+    embed.set_thumbnail(
+    url="https://cdn.prod.website-files.com/627128d862c9a44234848dda/689573cac182e13df4d06ef4_Rizki%20Apc.jpg"
+)
+    embed.set_image(
+    url="https://cdn.prod.website-files.com/627128d862c9a44234848dda/64448bdcb67dfe8e5a4b6dab_MOUSEPAD-1-FULL.jpg"
+    )
 
     return embed
 
@@ -81,7 +82,8 @@ async def handle_play(guild, user, query, send_func):
     if not player:
         return await send_func("Pls Join Voice Channel")
 
-    tracks = await wavelink.Playable.search(f"ytsearch:{query}")
+    tracks = await wavelink.Playable.search(query)
+
     if not tracks:
         return await send_func("Shoko get failed stream")
 
@@ -211,19 +213,22 @@ async def slash_play(interaction: discord.Interaction, search: str):
     )
 
 
-@bot.tree.command(name="queue", description="Show music queue")
+@bot.tree.command(name="list", description="Show music list")
 async def slash_queue(interaction: discord.Interaction):
     if not queues[interaction.guild.id]:
-        return await interaction.response.send_message("Queue is empty")
+        return await interaction.response.send_message("list music is empty")
 
     description = "\n".join(
         f"{i+1}. {t.title} ({format_duration(t.length)})"
         for i, t in enumerate(queues[interaction.guild.id])
     )
 
-    embed = discord.Embed(title="📜 Music Queue",
+    emed = discord.Embed(title="List Music",
                           description=description,
-                          color=discord.Color.blue())
+                          color=discord.Color.blue()
+                          )
+    embed.set_thumbnail(url="https://cdn.prod.website-files.com/627128d862c9a44234848dda/64dc8dfab3dfcf5fa53e042b_33.jpg")
+    embed.set_image(url="https://cdn.prod.website-files.com/627128d862c9a44234848dda/644348eb0bdf182b2c582715_STARFIELD-FULL.jpg")
 
     await interaction.response.send_message(embed=embed)
 
