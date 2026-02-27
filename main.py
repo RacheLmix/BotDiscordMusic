@@ -1,12 +1,12 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-import yt_dlp
-import asyncio
-import os
 import wavelink
+import asyncio
+from collections import defaultdict
+from datetime import timedelta
 
-Token = "YOUR_BOT_TOKEN"
+TOKEN = ""
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -14,141 +14,172 @@ intents.voice_states = True
 
 bot = commands.Bot(command_prefix="Shoko ", intents=intents)
 
-ytdl_opts = {
-    "format": "bestaudio[ext=m4a]/bestaudio/best",
-    "quiet": True,
-    "default_search": "ytsearch",
-    "noplaylist": True,
-    "geo_bypass": True
-}
+queues = defaultdict(list)
+cooldowns = {}
 
-ytdl = yt_dlp.YoutubeDL(ytdl_opts)
-queues = {}
-
-
-# ================= LAVALINK CONNECT =================
+# ================= READY =================
 @bot.event
 async def on_ready():
-    await bot.tree.sync()
-    print(f"Shoko ready as {bot.user}")
+    print(f"Logged in as {bot.user}")
 
     node = wavelink.Node(
-        uri="http://localhost:8080",
-        password="youshallnotpass"  # đổi nếu bạn đã đổi trong application.yml
+        uri="http://127.0.0.1:8080",
+        password="292005"
     )
 
-    await wavelink.Pool.connect(client=bot, nodes=[node])
-    print("Connected to Lavalink!")
+    await wavelink.Pool.connect(nodes=[node], client=bot)
+    print("✅ Lavalink connected")
+
+    synced = await bot.tree.sync()
+    print(f"✅ Synced {len(synced)} global slash commands")
 
 
-# ================= QUEUE HANDLER =================
-async def play_next_song(guild_id, channel):
-    player: wavelink.Player = discord.utils.get(bot.voice_clients, guild__id=guild_id)
-
-    if guild_id in queues and queues[guild_id]:
-        next_url = queues[guild_id].pop(0)
-        tracks = await wavelink.Playable.search(next_url)
-
-        if tracks:
-            track = tracks[0]
-            await player.play(track)
-            await channel.send(f"Shoko Play Song: **{track.title}**")
-    else:
-        await channel.send("End song, wait for the next song")
+# ================= UTIL =================
+def format_duration(ms):
+    return str(timedelta(seconds=ms // 1000))
 
 
-async def play_music(guild_id, channel, url):
-    player: wavelink.Player = discord.utils.get(bot.voice_clients, guild__id=guild_id)
+def create_nowplaying_embed(track):
+    embed = discord.Embed(
+        title="🎶 Now Playing",
+        description=f"**{track.title}**",
+        color=discord.Color.purple()
+    )
+    embed.add_field(name="Author", value=track.author, inline=True)
+    embed.add_field(name="Duration", value=format_duration(track.length), inline=True)
 
+    if track.artwork:
+        embed.set_thumbnail(url=track.artwork)
+
+    return embed
+
+
+async def ensure_voice(guild, user):
+    if not user.voice:
+        return None
+
+    if guild.voice_client:
+        return guild.voice_client
+
+    return await user.voice.channel.connect(cls=wavelink.Player)
+
+
+async def remove_cooldown(user_id):
+    await asyncio.sleep(2)
+    cooldowns.pop(user_id, None)
+
+
+async def handle_play(guild, user, query, send_func):
+
+    if user.id in cooldowns:
+        return await send_func("Slow down spammer")
+
+    cooldowns[user.id] = True
+    asyncio.create_task(remove_cooldown(user.id))
+
+    player: wavelink.Player = await ensure_voice(guild, user)
     if not player:
-        return
+        return await send_func("Pls Join Voice Channel")
 
-    tracks = await wavelink.Playable.search(url)
-
+    tracks = await wavelink.Playable.search(f"ytsearch:{query}")
     if not tracks:
-        await channel.send("Shoko get failed stream")
-        return
+        return await send_func("Shoko get failed stream")
 
     track = tracks[0]
+
+    if player.playing or player.paused:
+        queues[guild.id].append(track)
+        return await send_func("Add success PlayList")
+
     await player.play(track)
-    await channel.send(f"Shoko Play Song: **{track.title}**")
+    await send_func(embed=create_nowplaying_embed(track),
+                    view=PlayerControls(player))
+
+
+async def play_next(player: wavelink.Player):
+    guild_id = player.guild.id
+
+    if queues[guild_id]:
+        next_track = queues[guild_id].pop(0)
+        await player.play(next_track)
+
+        channel = player.guild.system_channel
+        if channel:
+            await channel.send(embed=create_nowplaying_embed(next_track),
+                               view=PlayerControls(player))
+    else:
+        print("Queue empty - staying connected")
+
+
+# ================= EVENTS =================
+@bot.event
+async def on_wavelink_track_end(payload):
+    await play_next(payload.player)
 
 
 @bot.event
-async def on_wavelink_track_end(payload):
-    guild_id = payload.player.guild.id
-    channel = payload.player.guild.system_channel
-
-    if guild_id in queues and queues[guild_id]:
-        next_url = queues[guild_id].pop(0)
-        tracks = await wavelink.Playable.search(next_url)
-
-        if tracks:
-            await payload.player.play(tracks[0])
-            if channel:
-                await channel.send(f"Shoko Play Song: **{tracks[0].title}**")
+async def on_wavelink_track_exception(payload):
+    print("Track exception:", payload.exception)
 
 
-# ================= PREFIX COMMANDS =================
+# ================= BUTTON VIEW =================
+class PlayerControls(discord.ui.View):
+    def __init__(self, player):
+        super().__init__(timeout=180)
+        self.player = player
+
+    @discord.ui.button(label="⏯", style=discord.ButtonStyle.primary)
+    async def pause_resume(self, interaction: discord.Interaction, _):
+
+        if self.player.paused:
+            await self.player.pause(False)
+            await interaction.response.send_message("▶ Resume", ephemeral=True)
+        else:
+            await self.player.pause(True)
+            await interaction.response.send_message("⏸ Pause", ephemeral=True)
+
+    @discord.ui.button(label="⏭", style=discord.ButtonStyle.secondary)
+    async def skip(self, interaction: discord.Interaction, _):
+        await self.player.stop()
+        await interaction.response.send_message("⏭ Skipped", ephemeral=True)
+
+    @discord.ui.button(label="⏹", style=discord.ButtonStyle.danger)
+    async def stop(self, interaction: discord.Interaction, _):
+        queues[self.player.guild.id].clear()
+        await self.player.stop()
+        await interaction.response.send_message("⏹ Stopped & Cleared", ephemeral=True)
+
+
+# ================= PREFIX COMMAND =================
 @bot.command()
 async def join(ctx):
-    if ctx.author.voice:
-        channel = ctx.author.voice.channel
-        if ctx.voice_client:
-            await ctx.voice_client.move_to(channel)
-        else:
-            await channel.connect(cls=wavelink.Player)
-        await ctx.send("Shoko Joined voice channel")
-    else:
-        await ctx.send("Pls Join Voice Channel")
+    if not ctx.author.voice:
+        return await ctx.send("Pls Join Voice Channel")
+
+    await ensure_voice(ctx.guild, ctx.author)
+    await ctx.send("Shoko Joined voice channel")
 
 
 @bot.command()
-async def play(ctx, *, search):
-    if not ctx.voice_client:
-        await ctx.invoke(join)
-
-    guild_id = ctx.guild.id
-
-    if guild_id not in queues:
-        queues[guild_id] = []
-
-    player: wavelink.Player = ctx.voice_client
-
-    if player.playing:
-        queues[guild_id].append(search)
-        await ctx.send("Add success PlayList")
-    else:
-        await play_music(guild_id, ctx.channel, search)
+async def play(ctx, *, search: str):
+    await handle_play(ctx.guild, ctx.author, search, ctx.send)
 
 
 @bot.command()
-async def skip(ctx):
-    if ctx.voice_client:
-        ctx.voice_client.stop()
-        await ctx.send("Skip Song")
+async def queue(ctx):
+    if not queues[ctx.guild.id]:
+        return await ctx.send("Queue is empty")
 
+    description = "\n".join(
+        f"{i+1}. {t.title} ({format_duration(t.length)})"
+        for i, t in enumerate(queues[ctx.guild.id])
+    )
 
-@bot.command()
-async def pause(ctx):
-    if ctx.voice_client:
-        ctx.voice_client.pause()
-        await ctx.send("Pause")
+    embed = discord.Embed(title="📜 Music Queue",
+                          description=description,
+                          color=discord.Color.blue())
 
-
-@bot.command()
-async def resume(ctx):
-    if ctx.voice_client:
-        ctx.voice_client.resume()
-        await ctx.send("Resume")
-
-
-@bot.command()
-async def stop(ctx):
-    if ctx.voice_client:
-        queues[ctx.guild.id] = []
-        ctx.voice_client.stop()
-        await ctx.send("Stop & Clear Queue")
+    await ctx.send(embed=embed)
 
 
 @bot.command()
@@ -158,71 +189,87 @@ async def leave(ctx):
         await ctx.send("Bye Bye")
 
 
-# ================= SLASH COMMANDS =================
+# ================= SLASH COMMAND =================
 @bot.tree.command(name="join", description="Join voice channel")
 async def slash_join(interaction: discord.Interaction):
-    if interaction.user.voice:
-        channel = interaction.user.voice.channel
-        await channel.connect(cls=wavelink.Player)
-        await interaction.response.send_message("Shoko Joined voice channel")
-    else:
-        await interaction.response.send_message("Pls Join Voice Channel")
+    if not interaction.user.voice:
+        return await interaction.response.send_message("Pls Join Voice Channel")
+
+    await ensure_voice(interaction.guild, interaction.user)
+    await interaction.response.send_message("Shoko Joined voice channel")
 
 
-@bot.tree.command(name="play", description="Play music from YouTube")
-@app_commands.describe(search="Link hoặc tên bài hát")
+@bot.tree.command(name="play", description="Play a song")
+@app_commands.describe(search="Song name or URL")
 async def slash_play(interaction: discord.Interaction, search: str):
     await interaction.response.defer()
+    await handle_play(
+        interaction.guild,
+        interaction.user,
+        search,
+        interaction.followup.send
+    )
 
-    if not interaction.guild.voice_client:
-        if interaction.user.voice:
-            await interaction.user.voice.channel.connect(cls=wavelink.Player)
-        else:
-            await interaction.followup.send("Pls Join Voice Channel")
-            return
 
-    guild_id = interaction.guild.id
+@bot.tree.command(name="queue", description="Show music queue")
+async def slash_queue(interaction: discord.Interaction):
+    if not queues[interaction.guild.id]:
+        return await interaction.response.send_message("Queue is empty")
 
-    if guild_id not in queues:
-        queues[guild_id] = []
+    description = "\n".join(
+        f"{i+1}. {t.title} ({format_duration(t.length)})"
+        for i, t in enumerate(queues[interaction.guild.id])
+    )
 
-    player: wavelink.Player = interaction.guild.voice_client
+    embed = discord.Embed(title="📜 Music Queue",
+                          description=description,
+                          color=discord.Color.blue())
 
-    if player.playing:
-        queues[guild_id].append(search)
-        await interaction.followup.send("Add success PlayList")
-    else:
-        await play_music(guild_id, interaction.channel, search)
-        await interaction.followup.send("Processing...")
+    await interaction.response.send_message(embed=embed)
 
 
 @bot.tree.command(name="skip", description="Skip current song")
 async def slash_skip(interaction: discord.Interaction):
-    if interaction.guild.voice_client:
-        interaction.guild.voice_client.stop()
-        await interaction.response.send_message("Skip Song")
+    player = interaction.guild.voice_client
+    if not player:
+        return await interaction.response.send_message("Nothing playing")
 
+    await player.stop()
+    await interaction.response.send_message("⏭ Skipped")
 
-@bot.tree.command(name="pause", description="Pause music")
+@bot.tree.command(name="pause", description="Pause current song")
 async def slash_pause(interaction: discord.Interaction):
-    if interaction.guild.voice_client:
-        interaction.guild.voice_client.pause()
-        await interaction.response.send_message("Pause")
+    player: wavelink.Player = interaction.guild.voice_client
 
+    if not player or not player.playing:
+        return await interaction.response.send_message("Nothing playing")
 
-@bot.tree.command(name="resume", description="Resume music")
+    await player.pause(True)
+    await interaction.response.send_message("⏸ Paused")
+
+@bot.tree.command(name="resume", description="Resume current song")
 async def slash_resume(interaction: discord.Interaction):
-    if interaction.guild.voice_client:
-        interaction.guild.voice_client.resume()
-        await interaction.response.send_message("Resume")
+    player: wavelink.Player = interaction.guild.voice_client
+
+    if not player or not player.paused:
+        return await interaction.response.send_message("Nothing paused")
+
+    await player.pause(False)
+    await interaction.response.send_message("▶ Resumed")
 
 
 @bot.tree.command(name="stop", description="Stop and clear queue")
 async def slash_stop(interaction: discord.Interaction):
-    if interaction.guild.voice_client:
-        queues[interaction.guild.id] = []
-        interaction.guild.voice_client.stop()
-        await interaction.response.send_message("Stop & Clear Queue")
+    player: wavelink.Player = interaction.guild.voice_client
+
+    if not player:
+        return await interaction.response.send_message("Nothing playing")
+
+    queues[interaction.guild.id].clear()
+    await player.stop()
+    await interaction.response.send_message("⏹ Stopped & Cleared")
+
+
 
 
 @bot.tree.command(name="leave", description="Leave voice channel")
@@ -232,4 +279,4 @@ async def slash_leave(interaction: discord.Interaction):
         await interaction.response.send_message("Bye Bye")
 
 
-bot.run(Token)
+bot.run(TOKEN)

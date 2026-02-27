@@ -1,8 +1,0 @@
-server:
-  port: 8080
-
-lavalink:
-  server:
-    password: "292005"
-
-plugins: []

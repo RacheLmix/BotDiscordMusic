@@ -1,0 +1,18 @@
+server:
+  port: 8080
+
+lavalink:
+  server:
+    password: "292005"
+
+    sources:
+      youtube: false
+      bandcamp: true
+      soundcloud: true
+      twitch: true
+      vimeo: true
+      http: true
+      local: false
+
+  plugins:
+    - dependency: "dev.lavalink.youtube:youtube-plugin:1.18.0"
